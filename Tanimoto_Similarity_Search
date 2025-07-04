@@ -1,8 +1,6 @@
 # Tanimoto Similarity Search Across KEGG, PubChem, and ChEBI
 # Compatible with Jupyter and CLI
 # !pip install requests pandas numpy tqdm rdkit matplotlib seaborn scipy
-# Tanimoto Similarity Search Across KEGG, PubChem, and ChEBI
-# Compatible with Jupyter and CLI
 
 import os
 import time
@@ -11,6 +9,8 @@ import logging
 import requests
 import pandas as pd
 import numpy as np
+import functools
+import random
 from tqdm import tqdm
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
@@ -51,7 +51,25 @@ def compute_tanimoto(smiles1, smiles2):
         return DataStructs.TanimotoSimilarity(fp1, fp2)
     return 0.0
 
+def retry(exception_to_check, tries=3, delay=1.0, backoff=2.0):
+    def deco_retry(f):
+        @functools.wraps(f)
+        def f_retry(*args, **kwargs):
+            mtries, mdelay = tries, delay
+            while mtries > 1:
+                try:
+                    return f(*args, **kwargs)
+                except exception_to_check as e:
+                    logging.warning(f"{f.__name__}: {e}, Retrying in {mdelay}s...")
+                    time.sleep(mdelay + random.uniform(0, 0.5))
+                    mtries -= 1
+                    mdelay *= backoff
+            return f(*args, **kwargs)
+        return f_retry
+    return deco_retry
+
 # ------------------ PubChem Search --------------------------
+@retry(Exception, tries=3)
 def pubchem_similar(smiles, threshold=90, retries=3, delay=1):
     url = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/similarity/smiles/JSON'
     params = {
@@ -75,6 +93,7 @@ def pubchem_similar(smiles, threshold=90, retries=3, delay=1):
         time.sleep(delay)
     return []
 
+@retry(Exception, tries=3)
 def pubchem_properties(cids):
     if not cids:
         return []
@@ -89,6 +108,7 @@ def pubchem_properties(cids):
         return []
 
 # ------------------ KEGG Search -----------------------------
+@retry(Exception, tries=3)
 def get_smiles_from_kegg(kegg_id):
     url = f'https://rest.kegg.jp/get/{kegg_id}/mol'
     try:
@@ -101,6 +121,7 @@ def get_smiles_from_kegg(kegg_id):
         logging.warning(f"KEGG {kegg_id} error: {e}")
     return None
 
+@retry(Exception, tries=3)
 def fetch_kegg_compounds():
     url = 'https://rest.kegg.jp/list/compound'
     try:
@@ -116,10 +137,29 @@ def fetch_kegg_compounds():
         logging.warning(f"KEGG list fetch error: {e}")
         return []
 
+def load_kegg_smiles_cache():
+    if os.path.exists(KEGG_CACHE_FILE):
+        return pd.read_csv(KEGG_CACHE_FILE).set_index("KEGG_ID")["SMILES"].to_dict()
+    return {}
+
+def save_kegg_smiles_cache(cache):
+    df = pd.DataFrame(list(cache.items()), columns=["KEGG_ID", "SMILES"])
+    df.to_csv(KEGG_CACHE_FILE, index=False)
+
 # ------------------ ChEBI Search ----------------------------
 def chebi_similar(smiles):
-    # Fallback: static ChEBI TSV or custom list
-    return []  # To be implemented with RDF or TSV search
+    # Dummy ChEBI entries for demonstration purposes.
+    # Replace with real search logic or file/database query as needed.
+    dummy_chebi = [
+        {"ID": "CHEBI:12345", "SMILES": "OC(=O)C1=CC=CC=C1", "MolFormula": "C7H6O2"},
+        {"ID": "CHEBI:67890", "SMILES": "C1=CC=C(C=C1)C(=O)O", "MolFormula": "C7H6O2"}
+    ]
+    results = []
+    for entry in dummy_chebi:
+        sim = compute_tanimoto(smiles, entry["SMILES"])
+        if sim >= SIMILARITY_THRESHOLD:
+            results.append(("ChEBI", entry["ID"], entry["SMILES"], entry["MolFormula"], sim))
+    return results
 
 # ------------------ Main Collection -------------------------
 all_results = []
@@ -132,15 +172,24 @@ for prop in pubchem_properties(cids):
         all_results.append(("PubChem", str(prop.get("CID", "")), prop["CanonicalSMILES"], prop["MolecularFormula"], sim))
 
 # KEGG
-for kid in tqdm(fetch_kegg_compounds()[:500]):
+kegg_cache = load_kegg_smiles_cache()
+kegg_ids = fetch_kegg_compounds()[:500]
+new_kegg = [kid for kid in kegg_ids if kid not in kegg_cache]
+for kid in tqdm(new_kegg, desc="Fetching new KEGG SMILES"):
     smiles = get_smiles_from_kegg(kid)
+    if smiles:
+        kegg_cache[kid] = smiles
+save_kegg_smiles_cache(kegg_cache)
+
+for kid in tqdm(kegg_ids, desc="Computing KEGG similarity"):
+    smiles = kegg_cache.get(kid)
     if smiles:
         sim = compute_tanimoto(SMILES_BASE, smiles)
         if sim >= SIMILARITY_THRESHOLD:
             all_results.append(("KEGG", kid, smiles, "", sim))
 
-# ChEBI (to be filled later)
-# ...
+# ChEBI (dummy)
+all_results.extend(chebi_similar(SMILES_BASE))
 
 # ------------------ Output ----------------------------------
 df = pd.DataFrame(all_results, columns=["Source", "ID", "SMILES", "MolFormula", "Tanimoto"])
