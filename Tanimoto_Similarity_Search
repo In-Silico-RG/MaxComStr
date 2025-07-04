@@ -1,0 +1,173 @@
+# tanimoto_similarity_search.py
+
+import os
+import requests
+import time
+import logging
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit import DataStructs
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Tuple, Optional
+
+# -----------------------------------
+# Configurations
+# -----------------------------------
+
+#-------------------------------------
+# Betalamic Acid 
+# Betalamic acid is a key building block for all betalain pigments
+# characterized by a 1,2,4,7,7-pentasubstituted 1,7-diazaheptamethin system. 
+# It is a dicarboxylic acid with the chemical formula C9H9NO5 and is 
+# structurally described as 4-(2-oxoethylidene)-1,2,3,4-tetrahydropyridine-2,6-dicarboxylic acid. 
+# Betalamic acid is found in the vacuoles of plants, where it serves as a 
+# precursor for the formation of betacyanins (red-violet pigments) and 
+# betaxanthins (yellow-orange pigments). 
+
+BASE_SMILES = 'OC(=O)[C@@H]1CC(=C/C=O)C=C(N1)C(=O)O'
+SIMILARITY_THRESHOLD = 0.8
+N_WORKERS = 8
+MAX_RETRIES = 3
+OUTPUT_CSV = 'similar_structures.csv'
+HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
+# Global fingerprint cache
+fingerprint_cache = {}
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+# -----------------------------------
+# Utility Functions
+# -----------------------------------
+def get_fingerprint(smiles: str, radius: int = 2, nbits: int = 2048):
+    if smiles in fingerprint_cache:
+        return fingerprint_cache[smiles]
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nbits)
+        fingerprint_cache[smiles] = fp
+        return fp
+    return None
+
+def tanimoto_similarity(smiles1: str, smiles2: str) -> float:
+    fp1 = get_fingerprint(smiles1)
+    fp2 = get_fingerprint(smiles2)
+    if fp1 and fp2:
+        return DataStructs.TanimotoSimilarity(fp1, fp2)
+    return 0.0
+
+# -----------------------------------
+# PubChem Search
+# -----------------------------------
+def get_similar_pubchem(base_smiles: str, threshold: float = 0.8, max_records: int = 100) -> List[Tuple[str, str, str, float]]:
+    logging.info("Querying PubChem...")
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/similarity/smiles/{base_smiles}/JSON'
+    params = {'Threshold': int(threshold * 100), 'MaxRecords': max_records, 'Format': 'JSON'}
+    try:
+        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        cids = r.json()['IdentifierList']['CID']
+        return fetch_pubchem_properties(cids, base_smiles)
+    except Exception as e:
+        logging.warning(f"PubChem query failed: {e}")
+        return []
+
+def fetch_pubchem_properties(cids: List[int], base_smiles: str) -> List[Tuple[str, str, str, float]]:
+    results = []
+    batch_size = 50
+    for i in range(0, len(cids), batch_size):
+        chunk = cids[i:i + batch_size]
+        url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{"%2C".join(map(str, chunk))}/property/CanonicalSMILES,MolecularFormula/JSON'
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            props = r.json()['PropertyTable']['Properties']
+            for i, prop in enumerate(props):
+                smiles = prop['CanonicalSMILES']
+                formula = prop['MolecularFormula']
+                sim = tanimoto_similarity(base_smiles, smiles)
+                if sim >= SIMILARITY_THRESHOLD:
+                    results.append((f'PubChem_{prop["CID"]}', smiles, formula, sim))
+        except Exception as e:
+            logging.warning(f"Error fetching PubChem properties: {e}")
+    return results
+
+# -----------------------------------
+# KEGG Search
+# -----------------------------------
+def get_kegg_ids() -> List[str]:
+    url = 'https://rest.kegg.jp/list/compound'
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        return [line.split('\t')[0].split(':')[1] for line in r.text.strip().split('\n') if line.startswith('cpd:')]
+    except Exception as e:
+        logging.warning(f"Error fetching KEGG list: {e}")
+        return []
+
+def get_smiles_from_kegg(kegg_id: str) -> Optional[str]:
+    for attempt in range(MAX_RETRIES):
+        try:
+            url = f'https://rest.kegg.jp/get/{kegg_id}/mol'
+            time.sleep(0.2)
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            if r.status_code != 200:
+                continue
+            mol = Chem.MolFromMolBlock(r.text)
+            if mol:
+                return Chem.MolToSmiles(mol)
+        except:
+            continue
+    return None
+
+def search_kegg(base_smiles: str) -> List[Tuple[str, str, str, float]]:
+    kegg_ids = get_kegg_ids()
+    results = []
+
+    def process(kid):
+        smiles = get_smiles_from_kegg(kid)
+        if smiles:
+            sim = tanimoto_similarity(base_smiles, smiles)
+            if sim >= SIMILARITY_THRESHOLD:
+                mol = Chem.MolFromSmiles(smiles)
+                formula = Chem.rdMolDescriptors.CalcMolFormula(mol) if mol else ''
+                return (f'KEGG_{kid}', smiles, formula, sim)
+        return None
+
+    with ThreadPoolExecutor(max_workers=N_WORKERS) as executor:
+        futures = {executor.submit(process, kid): kid for kid in kegg_ids}
+        for f in tqdm(as_completed(futures), total=len(futures)):
+            res = f.result()
+            if res:
+                results.append(res)
+
+    return results
+
+# -----------------------------------
+# Main script
+# -----------------------------------
+def main():
+    all_results = []
+
+    # PubChem
+    pubchem_results = get_similar_pubchem(BASE_SMILES)
+    all_results.extend(pubchem_results)
+
+    # KEGG
+    kegg_results = search_kegg(BASE_SMILES)
+    all_results.extend(kegg_results)
+
+    # Future: Add ChEBI here
+
+    # Sort and write
+    all_results.sort(key=lambda x: x[3], reverse=True)
+    df = pd.DataFrame(all_results, columns=['Structure #', 'SMILES', 'Mol Formula', 'Tanimoto Similarity'])
+    df.insert(1, 'My ID', [f'MY_{i+1}' for i in range(len(df))])
+    df.to_csv(OUTPUT_CSV, index=False)
+    print(f"\n✅ Results saved to {OUTPUT_CSV}")
+    print(df.head(10))
+
+if __name__ == '__main__':
+    main()
