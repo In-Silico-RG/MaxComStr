@@ -1,5 +1,8 @@
 # Tanimoto Similarity Search Across KEGG, PubChem, and ChEBI
 # Compatible with Jupyter and CLI
+# !pip install requests pandas numpy tqdm rdkit matplotlib seaborn scipy
+# Tanimoto Similarity Search Across KEGG, PubChem, and ChEBI
+# Compatible with Jupyter and CLI
 
 import os
 import time
@@ -49,26 +52,34 @@ def compute_tanimoto(smiles1, smiles2):
     return 0.0
 
 # ------------------ PubChem Search --------------------------
-def pubchem_similar(smiles, threshold=90):
+def pubchem_similar(smiles, threshold=90, retries=3, delay=1):
     url = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/similarity/smiles/JSON'
     params = {
         'smiles': smiles,
         'Threshold': threshold,
         'MaxRecords': 100
     }
-    try:
-        r = requests.get(url, params=params)
-        r.raise_for_status()
-        cids = r.json()['IdentifierList']['CID']
-        return cids
-    except Exception as e:
-        logging.warning(f"PubChem error: {e}")
-        return []
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200:
+                try:
+                    json_data = r.json()
+                    return json_data.get('IdentifierList', {}).get('CID', [])
+                except Exception as parse_err:
+                    logging.warning(f"PubChem response not JSON: {parse_err}")
+            else:
+                logging.warning(f"PubChem bad response code: {r.status_code}")
+        except Exception as e:
+            logging.warning(f"PubChem error (attempt {attempt+1}): {e}")
+        time.sleep(delay)
+    return []
 
 def pubchem_properties(cids):
     if not cids:
         return []
-    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/" + ",".join(map(str, cids)) + "/property/CanonicalSMILES,MolecularFormula/JSON'
+    cid_list = ",".join(map(str, cids))
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid_list}/property/CanonicalSMILES,MolecularFormula/JSON'
     try:
         r = requests.get(url)
         r.raise_for_status()
@@ -95,7 +106,12 @@ def fetch_kegg_compounds():
     try:
         r = requests.get(url)
         r.raise_for_status()
-        return [line.split('\t')[0].split(':')[1] for line in r.text.strip().split('\n')]
+        compounds = []
+        for line in r.text.strip().split('\n'):
+            parts = line.strip().split('\t')
+            if parts and ':' in parts[0]:
+                compounds.append(parts[0].split(':')[1])
+        return compounds
     except Exception as e:
         logging.warning(f"KEGG list fetch error: {e}")
         return []
@@ -132,10 +148,16 @@ df.sort_values("Tanimoto", ascending=False, inplace=True)
 df.to_csv(OUTPUT_CSV, index=False)
 
 # ------------------ Image Grid ------------------------------
-top_mols = [Chem.MolFromSmiles(smi) for smi in df.SMILES.head(6)]
-top_labels = [f"{row.ID} ({row.Tanimoto:.2f})" for _, row in df.head(6).iterrows()]
-img = Draw.MolsToGridImage(top_mols, molsPerRow=3, subImgSize=(250, 250), legends=top_labels)
-img.save(MOLECULE_IMAGE)
+top_data = [(Chem.MolFromSmiles(row.SMILES), f"{row.ID} ({row.Tanimoto:.2f})")
+            for _, row in df.head(6).iterrows()]
+top_data = [(mol, label) for mol, label in top_data if mol is not None]
+
+if top_data:
+    mols, legends = zip(*top_data)
+    img = Draw.MolsToGridImage(mols, molsPerRow=3, subImgSize=(250, 250), legends=legends)
+    img.save(MOLECULE_IMAGE)
+else:
+    logging.warning("⚠️ No valid molecules to display in image grid.")
 
 # ------------------ Heatmap & Clustering --------------------
 fps = [get_fingerprint(smi) for smi in df.SMILES.head(30)]
