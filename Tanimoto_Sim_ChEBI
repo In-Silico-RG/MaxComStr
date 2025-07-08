@@ -8,12 +8,16 @@ from IPython.display import SVG, display
 RDLogger.DisableLog('rdApp.*')
 
 # === USER PARAMETERS ===
+#betalains
 # base_smiles = "O=C/C=C1/C=C(C(=O)O)N[C@H](C(=O)O)C1"  # Query SMILES
-base_smiles = "O=C(O)C1=CC(=CC=[N+]2c3cc(O)c(OC4OC(CO)C(O)C(O)C4O)cc3CC2C(=O)[O-])CC(C(=O)O)N1"
+#Luteina
+# base_smiles = "CC1=C[C@H](O)CC(C)(C)[C@H]1/C=C/C(C)=C/C=C/C(C)=C/C=C/C=C(C)/C=C/C=C(C)/C=C/C1=C(C)C[C@@H](O)CC1(C)C"
+#Kaempferol
+base_smiles = "O=c1c(O)c(-c2ccc(O)cc2)oc2cc(O)cc(O)c12"
 
 similarity_threshold = 0.5                      # Tanimoto similarity threshold
-sdf_file = "/home/aldo/sims/ChEBI_complete.sdf"            # Input SDF file
-output_csv = "/home/aldo/sims/chebi_similar_results.csv"  # Output CSV file
+sdf_file = "/home/aldo/sims/ChEBI_lite.sdf"            # Input SDF file
+output_csv = "/home/aldo/sims/chebi_sim_Kaempferol.csv"  # Output CSV file
 
 # === END USER PARAMETERS ===
 
