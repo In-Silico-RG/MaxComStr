@@ -72,8 +72,27 @@ with open(output_csv, "w", newline="") as csvfile:
 
 print(f"Done! Found and wrote {count} compounds with similarity >= {similarity_threshold} to {output_csv}.")
 
-df = pd.read_csv('chebi_sim_Luteina.csv')
-mols = [Chem.MolFromSmiles(smi) for smi in df['smiles']]  # Adjust 'smiles' as needed
-legends = [f"Sim: {sim:.2f}" for sim in df['similarity']]  # Adjust 'similarity' as needed
+# 1. Load your similar structures and visualize them (optional)
+df = pd.read_csv('/home/aldo/sims/chebi_sim_Luteina.csv')
+mols = [Chem.MolFromSmiles(smi) for smi in df['smiles']]
+legends = [f"Sim: {sim:.2f}" for sim in df['similarity']]
 img = Draw.MolsToGridImage(mols, legends=legends, useSVG=True)
 display(SVG(img.data))
+
+# 2. Prepare molecules for MCS calculation
+#    (If you want to use a different CSV, set output_csv = 'your_file.csv')
+output_csv = '/home/aldo/sims/chebi_sim_Luteina.csv'
+df = pd.read_csv(output_csv)
+smiles_list = df['smiles'].tolist()
+mols = [Chem.MolFromSmiles(smi) for smi in smiles_list if Chem.MolFromSmiles(smi) is not None]
+
+# 3. Calculate the Maximum Common Substructure (MCS)
+mcs_result = rdFMCS.FindMCS(mols)
+print("MCS SMARTS:", mcs_result.smartsString)
+print("Number of atoms in MCS:", mcs_result.numAtoms)
+print("Number of bonds in MCS:", mcs_result.numBonds)
+
+# 4. Convert SMARTS to molecule, visualize as SVG
+mcs_mol = Chem.MolFromSmarts(mcs_result.smartsString)
+svg = Draw.MolToSVG(mcs_mol, 400, 300)
+display(SVG(svg))
