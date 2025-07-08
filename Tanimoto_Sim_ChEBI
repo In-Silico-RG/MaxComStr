@@ -1,0 +1,75 @@
+# !pip install rdkit pandas IPython
+from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator, DataStructs
+import csv
+from rdkit import RDLogger
+from IPython.display import SVG, display
+
+RDLogger.DisableLog('rdApp.*')
+
+# === USER PARAMETERS ===
+# base_smiles = "O=C/C=C1/C=C(C(=O)O)N[C@H](C(=O)O)C1"  # Query SMILES
+base_smiles = "O=C(O)C1=CC(=CC=[N+]2c3cc(O)c(OC4OC(CO)C(O)C(O)C4O)cc3CC2C(=O)[O-])CC(C(=O)O)N1"
+
+similarity_threshold = 0.5                      # Tanimoto similarity threshold
+sdf_file = "/home/aldo/sims/ChEBI_complete.sdf"            # Input SDF file
+output_csv = "/home/aldo/sims/chebi_similar_results.csv"  # Output CSV file
+
+# === END USER PARAMETERS ===
+
+# Prepare base molecule and fingerprint
+base_mol = Chem.MolFromSmiles(base_smiles)
+if base_mol is None:
+    raise ValueError("Invalid base SMILES!")
+morgan_gen = rdFingerprintGenerator.GetMorganGenerator(
+    radius=3,
+    useBondTypes=True,
+    fpSize=2048,
+)
+base_fp = morgan_gen.GetFingerprint(base_mol)
+
+supplier = Chem.SDMolSupplier(sdf_file)
+
+with open(output_csv, "w", newline="") as csvfile:
+    writer = csv.DictWriter(csvfile, fieldnames=["chebi_id", "smiles", "similarity"])
+    writer.writeheader()
+    count = 0
+    print_count = 0  # Counter for examples printed
+
+    for i, mol in enumerate(supplier):
+        if mol is None:
+            continue
+        try:
+            # Print all properties for the first 5 valid molecules (for debug)
+ #           if print_count < 5:
+ #               print(f"All properties for example {print_count+1}: {mol.GetPropsAsDict()}")
+ #               print_count += 1
+
+            # Use the correct property for ChEBI ID
+            chebi_id = mol.GetProp("ChEBI ID") if mol.HasProp("ChEBI ID") else ""
+            smiles = Chem.MolToSmiles(mol)
+            if not chebi_id or not smiles:
+                continue
+
+            fp = morgan_gen.GetFingerprint(mol)
+            sim = DataStructs.TanimotoSimilarity(base_fp, fp)
+            if sim >= similarity_threshold:
+                writer.writerow({
+                    "chebi_id": chebi_id,
+                    "smiles": smiles,
+                    "similarity": sim
+                })
+                count += 1
+            if i % 10000 == 0 and i > 0:
+                print(f"Processed {i} molecules, found {count} matches...")
+
+        except Exception as e:
+            continue
+
+print(f"Done! Found and wrote {count} compounds with similarity >= {similarity_threshold} to {output_csv}.")
+
+df = pd.read_csv('chebi_sim_Luteina.csv')
+mols = [Chem.MolFromSmiles(smi) for smi in df['smiles']]  # Adjust 'smiles' as needed
+legends = [f"Sim: {sim:.2f}" for sim in df['similarity']]  # Adjust 'similarity' as needed
+img = Draw.MolsToGridImage(mols, legends=legends, useSVG=True)
+display(SVG(img.data))
